@@ -1,5 +1,7 @@
 package com.yad.service;
 
-public interface Person {
+import java.io.Serializable;
+
+public interface Person extends Serializable {
     String say(String msg);
 }

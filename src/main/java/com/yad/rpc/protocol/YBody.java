@@ -9,6 +9,15 @@ public class YBody  implements Serializable {
     private  Class<?>[] paramsType;
     private  Object[] args;
     private  Object  result;
+    private  long    stateId;
+
+    public long getStateId() {
+        return stateId;
+    }
+
+    public void setStateId(long stateId) {
+        this.stateId = stateId;
+    }
 
     public String getName() {
         return name;

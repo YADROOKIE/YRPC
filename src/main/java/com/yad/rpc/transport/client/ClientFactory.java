@@ -9,19 +9,16 @@ import com.yad.rpc.util.SerializeUtil;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.PooledByteBufAllocator;
-import io.netty.channel.Channel;
-import io.netty.channel.ChannelFuture;
-import io.netty.channel.ChannelInitializer;
-import io.netty.channel.ChannelPipeline;
+import io.netty.buffer.Unpooled;
+import io.netty.channel.*;
 import io.netty.channel.nio.NioEventLoop;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioSocketChannel;
+import io.netty.handler.codec.http.*;
 
-import java.io.Serializable;
-import java.net.InetSocketAddress;
-import java.nio.ByteBuffer;
+import java.io.*;
+import java.net.*;
 import java.util.Random;
-import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -91,27 +88,110 @@ public class ClientFactory {
         return  null;
     }
 
+    //传输
     public CompletableFuture transport(YBody body) {
-        //序列化
-        byte[] bodyBytes = SerializeUtil.serialize(body);
-        YHeader header = YHeader.createHeader(bodyBytes.length);
-        byte[] headerBytes = SerializeUtil.serialize(header);
-        System.out.println(headerBytes.length);
-
-        //TODO 这里的连接地址是写死的 ，后续要加上服务发现和服务注册根据服务名来进行连接
-        //获取连接
-        NioSocketChannel channel = factory.getClient(new InetSocketAddress("localhost",9090));
-
-        //注册 返回值
+        String type ="http";
         CompletableFuture res = new CompletableFuture();
-        ResponseMappingCallback.addCallback(header.getRequestId(),res);
+        if (type.equals("rpc")){
+            //序列化
+            byte[] bodyBytes = SerializeUtil.serialize(body);
+            YHeader header = YHeader.createHeader(bodyBytes.length);
+            byte[] headerBytes = SerializeUtil.serialize(header);
+//        System.out.println(headerBytes.length);
 
-        //写出数据
-        ByteBuf byteBuf = PooledByteBufAllocator.DEFAULT.buffer(headerBytes.length+bodyBytes.length );
-        byteBuf.writeBytes(headerBytes);
-        byteBuf.writeBytes(bodyBytes);
-        channel.writeAndFlush(byteBuf);
+            //TODO 这里的连接地址是写死的 ，后续要加上服务发现和服务注册根据服务名来进行连接
+            //获取连接
+            NioSocketChannel channel = factory.getClient(new InetSocketAddress("localhost",9090));
+            //注册 返回值
+            ResponseMappingCallback.addCallback(header.getRequestId(),res);
+            //写出数据
+            ByteBuf byteBuf = PooledByteBufAllocator.DEFAULT.buffer(headerBytes.length+bodyBytes.length );
+            byteBuf.writeBytes(headerBytes);
+            byteBuf.writeBytes(bodyBytes);
+            channel.writeAndFlush(byteBuf);
+        }else {
+            //1 使用 URL 发送请求 BIO
+//            urlTransport(body,res);
+            //2 netty创建客户端发送
+//            nettyTransport(body,res);
+            HttpNettyClient client = new HttpNettyClient();
+            client.transport(body,res);
+        }
+
 
         return  res;
+    }
+
+    private void nettyTransport(YBody body, CompletableFuture res) {
+        try {
+            //1 建立连接
+            NioEventLoopGroup group = new NioEventLoopGroup(1);
+            Bootstrap bootstrap = new Bootstrap();
+            ChannelFuture connect = bootstrap.group(group)
+                    .channel(NioSocketChannel.class)
+                    .handler(new ChannelInitializer<NioSocketChannel>() {
+                        @Override
+                        protected void initChannel(NioSocketChannel channel) throws Exception {
+                            ChannelPipeline ch = channel.pipeline();
+                            ch.addLast(new HttpClientCodec())
+                                    .addLast(new HttpObjectAggregator(1024*512))
+                                    .addLast(new ChannelInboundHandlerAdapter(){
+                                        @Override
+                                        public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+                                            FullHttpResponse response  = (FullHttpResponse) msg;
+                                            ByteBuf content = response.content();
+                                            byte[] data = new byte[content.readableBytes()];
+                                            content.readBytes(data);
+                                            YBody o = (YBody) SerializeUtil.unSerialize(data);
+                                            res.complete(o.getResult());
+                                        }
+                                    });
+                        }
+                    }).connect(new InetSocketAddress("localhost", 9090));
+            Channel channel = connect.sync().channel();
+
+            byte[] data = SerializeUtil.serialize(body);
+
+            //注意！！！ Jetty是 HTTP  1.0 不是 1.1
+            FullHttpRequest request = new
+                    DefaultFullHttpRequest(HttpVersion.HTTP_1_0,HttpMethod.POST,"/",Unpooled.copiedBuffer(data));
+
+            request.headers().set(HttpHeaderNames.CONTENT_LENGTH,data.length);
+
+            channel.writeAndFlush(request);
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+    }
+
+    private void urlTransport(YBody body, CompletableFuture res) {
+        try {
+            URL url = new URL("http://localhost:9090");
+            HttpURLConnection hc = (HttpURLConnection) url.openConnection();
+            //post
+            hc.setRequestMethod("POST");
+            hc.setDoOutput(true);
+            hc.setDoInput(true);
+
+            OutputStream out = hc.getOutputStream();
+            ObjectOutputStream oos = new ObjectOutputStream(out);
+            oos.writeObject(body);
+
+            int code = hc.getResponseCode();//在这里才发送
+
+            Object o = null;
+            if (code==200){
+                InputStream in = hc.getInputStream();
+                ObjectInputStream ins = new ObjectInputStream(in);
+                YBody obj = (YBody) ins.readObject();
+                o = obj.getResult();
+            }
+
+            res.complete(o);
+        }  catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 }
